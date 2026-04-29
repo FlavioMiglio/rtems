@@ -45,6 +45,7 @@
 
 #include <sys/queue.h>
 
+#include <stdint.h>
 #include <stdatomic.h>
 #include <rtems.h>
 #include <rtems/seterr.h>

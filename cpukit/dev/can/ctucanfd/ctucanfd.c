@@ -39,8 +39,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <errno.h>
 #include <stdbool.h>

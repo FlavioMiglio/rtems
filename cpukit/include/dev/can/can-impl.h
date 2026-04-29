@@ -42,6 +42,7 @@
 #ifndef __DEV_CAN_CAN_IMPL_H
 #define __DEV_CAN_CAN_IMPL_H
 
+#include <stdint.h>
 #include <stdatomic.h>
 #include <inttypes.h>
 #include <sys/queue.h>
