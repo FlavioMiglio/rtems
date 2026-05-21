@@ -89,7 +89,7 @@ void __attribute__((naked)) _ARMV7M_Exception_default( void )
 
 #ifdef ARM_MULTILIB_VFP
     /* Ensure that the FPU is enabled */
-    "ldr r4, =%[cpacr]\n"
+    "ldr r4, =%c[cpacr]\n"
     "tst r4, #(0xf << 20)\n"
     "bne 1f\n"
 
