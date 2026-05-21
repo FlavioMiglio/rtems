@@ -47,8 +47,6 @@ void __attribute__((naked)) _CPU_Context_restore(
   Context_Control *heir
 )
 {
-  (void) heir;
-
   __asm__ volatile (
     "movw r2, #:lower16:_Per_CPU_Information\n"
     "movt r2, #:upper16:_Per_CPU_Information\n"
@@ -62,7 +60,6 @@ void __attribute__((naked)) _CPU_Context_restore(
       [isrctxoff] "J" (offsetof(Context_Control, isr_nest_level)),
       [isrpcpuoff] "J" (offsetof(Per_CPU_Control, isr_nest_level))
   );
-  __builtin_unreachable();
 }
 
 #endif /* ARM_MULTILIB_ARCH_V7M */
