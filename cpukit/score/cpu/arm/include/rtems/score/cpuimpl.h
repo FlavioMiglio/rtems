@@ -155,7 +155,7 @@ void _CPU_Context_validate( uintptr_t pattern );
 
 static inline void _CPU_Instruction_illegal( void )
 {
-  __asm__ volatile ( "udf" );
+  __asm__ volatile ( "udf #0" );
 }
 
 static inline void _CPU_Instruction_no_operation( void )
