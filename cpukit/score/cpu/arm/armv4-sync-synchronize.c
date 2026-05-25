@@ -55,7 +55,9 @@ void __sync_synchronize_rtems( void )
   _ARM_Data_memory_barrier();
 }
 
+#ifndef __clang__
 void __sync_synchronize( void )
 {
   __sync_synchronize_rtems();
 }
+#endif
