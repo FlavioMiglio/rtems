@@ -8,13 +8,35 @@ build-type: option
 copyrights:
 - Copyright (C) 2020 embedded brains GmbH & Co. KG
 default:
-- enabled-by: true
+- enabled-by:
+  - clang
+  value:
+  - -Wno-error
+  - -Wmissing-prototypes
+  - -Wimplicit-function-declaration
+  - -Wstrict-prototypes
+  - -Wnested-externs
+  - -Wno-parentheses-equality
+  - -Wno-asm-operand-widths
+  - -Wno-gnu-variable-sized-type-not-at-end
+  - -Wno-sign-compare
+  - -Wno-default-const-init-var-unsafe
+  - -Wno-unused-function
+- enabled-by:
+  - gcc
   value:
   - -Wmissing-prototypes
   - -Wimplicit-function-declaration
   - -Wstrict-prototypes
   - -Wnested-externs
   - -Wold-style-declaration
+  - -Wno-unused-parameter
+- enabled-by: true
+  value:
+  - -Wmissing-prototypes
+  - -Wimplicit-function-declaration
+  - -Wstrict-prototypes
+  - -Wnested-externs
 description: |
   Warning flags passed to the C compiler
 enabled-by: true

@@ -17,6 +17,8 @@ links:
 - role: build-dependency
   uid: abi
 - role: build-dependency
+  uid: abiclang
+- role: build-dependency
   uid: obj
 - role: build-dependency
   uid: opteni2c1

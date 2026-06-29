@@ -16,11 +16,10 @@ install:
   - cpukit/include/rtems/test-printer.h
   - cpukit/include/rtems/test-scheduler.h
 install-path: ${BSP_LIBDIR}
-links: []
+links:
+- role: build-dependency
+  uid: objgcov
 source:
-- cpukit/libtest/gcovdumpinfobase64.c
-- cpukit/libtest/gcovdumpinfo.c
-- cpukit/libtest/gcovinfoset.c
 - cpukit/libtest/t-test-busy-tick.c
 - cpukit/libtest/t-test-busy.c
 - cpukit/libtest/t-test-checks-eno.c
@@ -44,8 +43,6 @@ source:
 - cpukit/libtest/testbusy.c
 - cpukit/libtest/testexit.c
 - cpukit/libtest/testextension.c
-- cpukit/libtest/testgcovbspreset.c
-- cpukit/libtest/testgcovdumpinfo.c
 - cpukit/libtest/testparallel.c
 - cpukit/libtest/testprinter.c
 - cpukit/libtest/testrun.c

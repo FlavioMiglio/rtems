@@ -4,11 +4,9 @@ actions:
 - find-program: null
 - env-assign: AS
 - env-assign: CC
-- env-assign: LINK_CC
 - set-value: clang++
 - find-program: null
 - env-assign: CXX
-- env-assign: LINK_CXX
 - set-value: llvm-ar
 - substitute: null
 - find-program: null
@@ -23,11 +21,93 @@ actions:
 - set-value:
   - -o
 - env-assign: ASLNK_TGT_F
-- set-value: --target=${ARCH}${ARCH_BITS}-unknown-rtems${__RTEMS_MAJOR__}
+- set-value:
+  # Tell Clang the target and where the RTEMS base is. The triple must match the
+  # real cross GCC name (arm-rtems7, NOT arm-unknown-rtems7).
+  - --target=${ARCH}-rtems${__RTEMS_MAJOR__}
+  - --sysroot=${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}
+  # Clang alone isn't a full RTEMS toolchain: borrow the GCC install for headers
+  # and internal libraries.
+  - --gcc-toolchain=${PREFIX}
+  # Waf passes ABI flags to the assembler too; tell Clang to ignore flags it
+  # doesn't need for a given job instead of erroring under -Werror.
+  - -Qunused-arguments
+  # RTEMS forces -nostdinc, which breaks the --sysroot include lookup. Shove
+  # Newlib's include folder back in so string.h etc. are found.
+  - -isystem
+  - ${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}/include
 - substitute: null
 - env-append: ABI_FLAGS
 - script: |
+    import os
     conf.load("ar asm clang clang++ gccdeps")
+
+    arch = conf.env['ARCH']
+    arch = arch[0] if isinstance(arch, list) else arch
+    major = conf.env['__RTEMS_MAJOR__']
+    major = major[0] if isinstance(major, list) else major
+    triple = f"{arch}-rtems{major}"
+    gxx = f"{triple}-g++"
+    gcc = f"{triple}-gcc"
+
+    # RTEMS uses -nostdinc, which blinds Clang to its own builtin headers
+    # (stdarg.h, stdbool.h, ...). Ask Clang for its resource dir and inject it
+    # back for both C and C++.
+    clang_res = conf.cmd_and_log(conf.env.CC + ['--print-resource-dir']).strip()
+    conf.env.append_value('CFLAGS', ['-isystem', f"{clang_res}/include"])
+    conf.env.append_value('CXXFLAGS', ['-isystem', f"{clang_res}/include"])
+
+    # With -nostdinc++ Clang has no path to the GCC C++ stdlib (libstdc++), so
+    # <system_error>, <stdexcept>, etc. are missing. Ask the cross g++ for its
+    # libstdc++ tree and inject the three standard dirs as C++-only includes.
+    libstdcxx = conf.cmd_and_log([gxx, '-print-file-name=include/c++']).strip()
+    for d in (libstdcxx,
+              os.path.join(libstdcxx, triple),
+              os.path.join(libstdcxx, 'backward')):
+        if os.path.isdir(d):
+            conf.env.append_value('CXXFLAGS', ['-isystem', d])
+
+    # --- Split clang-only flags out of ABI_FLAGS ---------------------------
+    # ABI_FLAGS is shared by compile and link. The static block above put
+    # clang-only driver flags (--target/--gcc-toolchain/--sysroot/
+    # -Qunused-arguments/-isystem <dir>) into it. The cross GCC used at link
+    # time rejects those. So pull them OUT of ABI_FLAGS (which feeds the link)
+    # and keep them only on the compile flag vars.
+    clang_only_prefixes = ('--target', '--gcc-toolchain', '--sysroot',
+                           '-Qunused-arguments')
+
+    compile_only, gcc_safe, skip = [], [], False
+    for f in conf.env.ABI_FLAGS:
+        if skip:                                   # path following -isystem
+            compile_only.append(f)
+            skip = False
+            continue
+        if f == '-isystem':
+            compile_only.append(f)
+            skip = True
+            continue
+        if f.startswith(clang_only_prefixes):
+            compile_only.append(f)
+        else:
+            gcc_safe.append(f)                     # -mcpu/-mthumb/-mfloat-abi/...
+
+    # ABI_FLAGS now carries only gcc-valid flags (the -m* float ABI). These
+    # reach BOTH compile and link, which keeps the float ABI consistent.
+    conf.env.ABI_FLAGS = gcc_safe
+
+    # Re-add the clang-only flags to the COMPILE vars only.
+    conf.env.append_value('CFLAGS', compile_only)
+    conf.env.append_value('CXXFLAGS', compile_only)
+    conf.env.append_value('ASFLAGS', compile_only)
+
+    # --- Link step: mirror the original wrapper ----------------------------
+    # Compile with clang, LINK with the cross GCC + -qrtems (pulls in the BSP
+    # start file and linker script; fixes the missing _start). ABI_FLAGS (now
+    # gcc-safe) still carries the -m* float ABI to the link, so the executable
+    # matches the hard-float libraries.
+    conf.env.LINK_CC = [gcc]
+    conf.env.LINK_CXX = [gxx]
+    conf.env.append_value('LINKFLAGS', ['-qrtems'])
 build-type: option
 copyrights:
 - Copyright (C) 2020 Hesham Almatary <Hesham.Almatary@cl.cam.ac.uk>

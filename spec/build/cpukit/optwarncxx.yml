@@ -8,6 +8,13 @@ build-type: option
 copyrights:
 - Copyright (C) 2020 embedded brains GmbH & Co. KG
 default:
+- enabled-by:
+  - clang
+  value:
+  - -Wno-error
+  - -Wno-unknown-warning-option
+  - -Wno-unused-private-field
+  - -Wno-extern-c-compat
 - enabled-by: true
   value: []
 description: |

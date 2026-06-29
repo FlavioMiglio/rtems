@@ -16,11 +16,11 @@ default:
   - -mcpu=cortex-m4
   - -mthumb
   - -mfloat-abi=hard
-  - -mfpu=auto
+  - -mfpu=fpv4-sp-d16
 description: |
   ABI flags
 enabled-by:
-- gcc
+- clang
 links: []
 name: ABI_FLAGS
 type: build
