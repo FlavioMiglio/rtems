@@ -41,6 +41,18 @@ static volatile stm32f4_usart *usart_get_regs(const console_tbl *ct)
   return (stm32f4_usart *) ct->ulCtrlPort1;
 }
 
+/*
+ * The polled/interrupt paths run for both the full (legacy) and the simple
+ * console driver.  Only the full driver allocates and fills Console_Port_Tbl;
+ * with the simple console it stays NULL, so fall back to the static
+ * Console_Configuration_Ports.
+ */
+static const console_tbl *usart_get_ct(int minor)
+{
+  return Console_Port_Tbl != NULL ?
+    Console_Port_Tbl [minor] : &Console_Configuration_Ports [minor];
+}
+
 #if 0
 static rtems_vector_number usart_get_irq_number(const console_tbl *ct)
 {
@@ -55,7 +67,7 @@ static rtems_vector_number usart_get_irq_number(const console_tbl *ct)
 static void stm32f4_usart_interrupt(void *arg)
 {
   rtems_termios_tty *tty = (rtems_termios_tty *) arg;
-  const console_tbl *ct = Console_Port_Tbl [tty->minor];
+  const console_tbl *ct = usart_get_ct(tty->minor);
   volatile stm32f4_usart *usart = usart_get_regs(ct);
 
   while ((usart->sr & STM32F4_USART_SR_RXNE) == STM32F4_USART_SR_RXNE)
@@ -156,7 +168,7 @@ static uint32_t usart_get_brr(
 
 static void usart_initialize(int minor)
 {
-  const console_tbl *ct = Console_Port_Tbl [minor];
+  const console_tbl *ct = usart_get_ct(minor);
   volatile stm32f4_usart *usart = usart_get_regs(ct);
   uint32_t pclk = usart_get_pclk(ct);
   uint32_t baud = usart_get_baud(ct);
@@ -183,7 +195,7 @@ static int usart_first_open(int major, int minor, void *arg)
   rtems_status_code sc = RTEMS_SUCCESSFUL;
   rtems_libio_open_close_args_t *oc = (rtems_libio_open_close_args_t *) arg;
   rtems_termios_tty *tty = (struct rtems_termios_tty *) oc->iop->data1;
-  const console_tbl *ct = Console_Port_Tbl [minor];
+  const console_tbl *ct = usart_get_ct(minor);
   console_data *cd = &Console_Port_Data [minor];
 
   cd->termios_data = tty;
@@ -208,7 +220,7 @@ static int usart_last_close(int major, int minor, void *arg)
 #ifdef BSP_CONSOLE_USE_INTERRUPTS
   rtems_libio_open_close_args_t *oc = (rtems_libio_open_close_args_t *) arg;
   rtems_termios_tty *tty = (struct rtems_termios_tty *) oc->iop->data1;
-  const console_tbl *ct = Console_Port_Tbl [minor];
+  const console_tbl *ct = usart_get_ct(minor);
 
   sc = rtems_interrupt_handler_remove(ct->ulIntVector, stm32f4_usart_interrupt, tty);
 #else
@@ -221,7 +233,7 @@ static int usart_last_close(int major, int minor, void *arg)
 #ifndef BSP_CONSOLE_USE_INTERRUPTS
 static int usart_read_polled(int minor)
 {
-  const console_tbl *ct = Console_Port_Tbl [minor];
+  const console_tbl *ct = usart_get_ct(minor);
   volatile stm32f4_usart *usart = usart_get_regs(ct);
 
   if ((usart->sr & STM32F4_USART_SR_RXNE) != 0) {
@@ -234,7 +246,7 @@ static int usart_read_polled(int minor)
 
 static void usart_write_polled(int minor, char c)
 {
-  const console_tbl *ct = Console_Port_Tbl [minor];
+  const console_tbl *ct = usart_get_ct(minor);
   volatile stm32f4_usart *usart = usart_get_regs(ct);
 
   while ((usart->sr & STM32F4_USART_SR_TXE) == 0) {
