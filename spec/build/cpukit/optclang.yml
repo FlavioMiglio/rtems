@@ -22,24 +22,27 @@ actions:
   - -o
 - env-assign: ASLNK_TGT_F
 - set-value:
-  # Tell Clang the target and where the RTEMS base is. The triple must match the
-  # real cross GCC name (arm-rtems7, NOT arm-unknown-rtems7).
+  # Target triple must match the real cross GCC name (arm-rtems7, not
+  # arm-unknown-rtems7), otherwise the link falls back to the host linker.
   - --target=${ARCH}-rtems${__RTEMS_MAJOR__}
   - --sysroot=${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}
-  # Clang alone isn't a full RTEMS toolchain: borrow the GCC install for headers
-  # and internal libraries.
+  # Clang is not a full RTEMS toolchain on its own: reuse the GCC install for
+  # headers and internal libraries.
   - --gcc-toolchain=${PREFIX}
-  # Waf passes ABI flags to the assembler too; tell Clang to ignore flags it
-  # doesn't need for a given job instead of erroring under -Werror.
+  # Waf feeds ABI flags to the assembler too; let Clang ignore flags it does
+  # not need for a given job instead of erroring out under -Werror.
   - -Qunused-arguments
-  # RTEMS forces -nostdinc, which breaks the --sysroot include lookup. Shove
-  # Newlib's include folder back in so string.h etc. are found.
+  # RTEMS forces -nostdinc, which breaks the --sysroot include lookup. Put
+  # Newlib's include dir back so string.h and friends are found.
   - -isystem
   - ${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}/include
 - substitute: null
 - env-append: ABI_FLAGS
 - script: |
     import os
+    import stat
+    import textwrap
+
     conf.load("ar asm clang clang++ gccdeps")
 
     arch = conf.env['ARCH']
@@ -50,16 +53,16 @@ actions:
     gxx = f"{triple}-g++"
     gcc = f"{triple}-gcc"
 
-    # RTEMS uses -nostdinc, which blinds Clang to its own builtin headers
-    # (stdarg.h, stdbool.h, ...). Ask Clang for its resource dir and inject it
+    # RTEMS uses -nostdinc, which hides Clang's own builtin headers
+    # (stdarg.h, stdbool.h, ...). Ask Clang for its resource dir and add it
     # back for both C and C++.
     clang_res = conf.cmd_and_log(conf.env.CC + ['--print-resource-dir']).strip()
     conf.env.append_value('CFLAGS', ['-isystem', f"{clang_res}/include"])
     conf.env.append_value('CXXFLAGS', ['-isystem', f"{clang_res}/include"])
 
-    # With -nostdinc++ Clang has no path to the GCC C++ stdlib (libstdc++), so
+    # With -nostdinc++ Clang cannot find the GCC C++ stdlib (libstdc++), so
     # <system_error>, <stdexcept>, etc. are missing. Ask the cross g++ for its
-    # libstdc++ tree and inject the three standard dirs as C++-only includes.
+    # libstdc++ tree and add the three standard dirs as C++-only includes.
     libstdcxx = conf.cmd_and_log([gxx, '-print-file-name=include/c++']).strip()
     for d in (libstdcxx,
               os.path.join(libstdcxx, triple),
@@ -67,18 +70,16 @@ actions:
         if os.path.isdir(d):
             conf.env.append_value('CXXFLAGS', ['-isystem', d])
 
-    # --- Split clang-only flags out of ABI_FLAGS ---------------------------
-    # ABI_FLAGS is shared by compile and link. The static block above put
-    # clang-only driver flags (--target/--gcc-toolchain/--sysroot/
-    # -Qunused-arguments/-isystem <dir>) into it. The cross GCC used at link
-    # time rejects those. So pull them OUT of ABI_FLAGS (which feeds the link)
-    # and keep them only on the compile flag vars.
+    # ABI_FLAGS is shared by compile and link. The static block above pushed
+    # clang-only driver flags into it. The cross GCC used at link time rejects
+    # those, so pull them out of ABI_FLAGS (which feeds the link) and keep them
+    # on the compile flag vars only.
     clang_only_prefixes = ('--target', '--gcc-toolchain', '--sysroot',
                            '-Qunused-arguments')
 
     compile_only, gcc_safe, skip = [], [], False
     for f in conf.env.ABI_FLAGS:
-        if skip:                                   # path following -isystem
+        if skip:                       # path following -isystem
             compile_only.append(f)
             skip = False
             continue
@@ -89,25 +90,117 @@ actions:
         if f.startswith(clang_only_prefixes):
             compile_only.append(f)
         else:
-            gcc_safe.append(f)                     # -mcpu/-mthumb/-mfloat-abi/...
+            gcc_safe.append(f)         # -mcpu / -mthumb / -mfloat-abi / ...
 
-    # ABI_FLAGS now carries only gcc-valid flags (the -m* float ABI). These
-    # reach BOTH compile and link, which keeps the float ABI consistent.
+    # ABI_FLAGS now holds only gcc-valid flags (the -m* float ABI). These reach
+    # both compile and link, keeping the float ABI consistent.
     conf.env.ABI_FLAGS = gcc_safe
 
-    # Re-add the clang-only flags to the COMPILE vars only.
     conf.env.append_value('CFLAGS', compile_only)
     conf.env.append_value('CXXFLAGS', compile_only)
     conf.env.append_value('ASFLAGS', compile_only)
 
-    # --- Link step: mirror the original wrapper ----------------------------
-    # Compile with clang, LINK with the cross GCC + -qrtems (pulls in the BSP
-    # start file and linker script; fixes the missing _start). ABI_FLAGS (now
-    # gcc-safe) still carries the -m* float ABI to the link, so the executable
-    # matches the hard-float libraries.
+    # Compile with clang, link with the cross GCC + -qrtems (pulls in the BSP
+    # start file and linker script; fixes the missing _start). ABI_FLAGS still
+    # carries the -m* float ABI to the link so the executable matches the
+    # hard-float libraries.
     conf.env.LINK_CC = [gcc]
     conf.env.LINK_CXX = [gxx]
     conf.env.append_value('LINKFLAGS', ['-qrtems'])
+
+    # ------------------------------------------------------------------
+    # Generate the aspis-cc wrapper and route the C compiler through it.
+    #
+    # The wrapper behaves exactly like clang for every file, except for
+    # aspis_sample_hardened/workload.c, which it runs through the ASPIS
+    # opt passes (emit IR -> harden -> compile back to an object). It also
+    # writes the .d dependency file waf expects, so gccdeps stays happy.
+    # ------------------------------------------------------------------
+    wrapper_src = textwrap.dedent('''\
+        #!/bin/bash
+        # aspis-cc: drop-in clang wrapper. Hardens only the hardened sample's
+        # workload.c through ASPIS; every other file goes straight to clang.
+
+        CLANG=/opt/rtems-llvm/rtems/bin/clang
+        OPT=/opt/rtems-llvm/rtems/bin/opt
+        PASSES=/opt/rtems-llvm/ASPIS/build/passes
+
+        # Find the .c source being compiled.
+        src=""
+        for a in "$@"; do
+          case "$a" in
+            *.c) src="$a" ;;
+          esac
+        done
+
+        # Only the hardened sample's workload goes through ASPIS.
+        case "$src" in
+          *aspis_sample_hardened/workload.c) : ;;
+          *) exec "$CLANG" "$@" ;;
+        esac
+
+        # Find the output object (-o file, either "-o x" or "-ox").
+        out=""; prev=""
+        for a in "$@"; do
+          if [ "$prev" = "-o" ]; then out="$a"; prev=""; continue; fi
+          case "$a" in
+            -o)   prev="-o" ;;
+            -o?*) out="${a#-o}" ;;
+            *)    ;;
+          esac
+        done
+
+        # waf/gccdeps expects the .d next to the object: same name, .o -> .d
+        depfile="${out%.o}.d"
+
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+
+        # Rebuild the flag list without -c/-S, the output, the dependency
+        # options and the source: we add those back in the right steps.
+        flags=(); prev=""; skip=""
+        for a in "$@"; do
+          if [ -n "$skip" ]; then skip=""; prev="$a"; continue; fi
+          case "$a" in
+            -c|-S)        prev="$a"; continue ;;
+            -o)           skip=1; prev="$a"; continue ;;
+            -o?*)         prev="$a"; continue ;;
+            -MF|-MT|-MQ)  skip=1; prev="$a"; continue ;;
+            -MMD|-MD|-MP) prev="$a"; continue ;;
+            "$src")       prev="$a"; continue ;;
+            *)            flags+=("$a") ;;
+          esac
+          prev="$a"
+        done
+
+        # 1. source -> IR, and write the .d file waf expects.
+        "$CLANG" "${flags[@]}" -g -MMD -MF "$depfile" -emit-llvm -S "$src" -o "$tmp/a.ll" || exit 1
+
+        # 2. ASPIS pipeline: EDDI + sEDDI + RASM + duplicate-globals.
+        # -debug-enabled=true is only valid once an ASPIS plugin (which links
+        # in Utils.cpp, where the flag is registered) has been loaded. The
+        # plain simplifycfg step below loads no plugin, so it must NOT get
+        # the flag or opt aborts with "Unknown command line argument".
+        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so"  -debug-enabled=true -passes="func-ret-to-ref"   "$tmp/a.ll" -o "$tmp/b.ll" -S || exit 1
+        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so" -debug-enabled=true -passes="eddi-verify"       "$tmp/b.ll" -o "$tmp/c.ll" -S || exit 1
+        "$OPT"                                                             -passes="simplifycfg"       "$tmp/c.ll" -o "$tmp/d.ll" -S || exit 1
+        "$OPT" -load-pass-plugin "$PASSES/libRASM.so"  -debug-enabled=true -passes="rasm-verify"       "$tmp/d.ll" -o "$tmp/e.ll" -S || exit 1
+        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so"  -debug-enabled=true -passes="duplicate-globals" "$tmp/e.ll" -o "$tmp/f.ll" -S || exit 1
+
+        # 3. hardened IR -> object.
+        "$CLANG" "${flags[@]}" -c "$tmp/f.ll" -o "$out" || exit 1
+
+        echo "[aspis-cc] HARDENED $src -> $out" >&2
+        ''')
+
+    wrapper_path = os.path.join(conf.bldnode.abspath(), 'aspis-cc')
+    with open(wrapper_path, 'w') as fp:
+        fp.write(wrapper_src)
+    os.chmod(wrapper_path, os.stat(wrapper_path).st_mode | stat.S_IEXEC)
+
+    # Route the C compiler through the wrapper. Leave CXX as clang++ so C++
+    # files are unaffected.
+    conf.env.CC = [wrapper_path]
 build-type: option
 copyrights:
 - Copyright (C) 2020 Hesham Almatary <Hesham.Almatary@cl.cam.ac.uk>

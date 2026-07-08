@@ -17,6 +17,8 @@ links:
 - role: build-dependency
   uid: aspissample
 - role: build-dependency
+  uid: aspissamplehardened  
+- role: build-dependency
   uid: basempnode1
 - role: build-dependency
   uid: basempnode2
