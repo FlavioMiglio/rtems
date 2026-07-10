@@ -22,18 +22,10 @@ actions:
   - -o
 - env-assign: ASLNK_TGT_F
 - set-value:
-  # Target triple must match the real cross GCC name (arm-rtems7, not
-  # arm-unknown-rtems7), otherwise the link falls back to the host linker.
   - --target=${ARCH}-rtems${__RTEMS_MAJOR__}
   - --sysroot=${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}
-  # Clang is not a full RTEMS toolchain on its own: reuse the GCC install for
-  # headers and internal libraries.
   - --gcc-toolchain=${PREFIX}
-  # Waf feeds ABI flags to the assembler too; let Clang ignore flags it does
-  # not need for a given job instead of erroring out under -Werror.
   - -Qunused-arguments
-  # RTEMS forces -nostdinc, which breaks the --sysroot include lookup. Put
-  # Newlib's include dir back so string.h and friends are found.
   - -isystem
   - ${PREFIX}/${ARCH}-rtems${__RTEMS_MAJOR__}/include
 - substitute: null
@@ -53,16 +45,10 @@ actions:
     gxx = f"{triple}-g++"
     gcc = f"{triple}-gcc"
 
-    # RTEMS uses -nostdinc, which hides Clang's own builtin headers
-    # (stdarg.h, stdbool.h, ...). Ask Clang for its resource dir and add it
-    # back for both C and C++.
     clang_res = conf.cmd_and_log(conf.env.CC + ['--print-resource-dir']).strip()
     conf.env.append_value('CFLAGS', ['-isystem', f"{clang_res}/include"])
     conf.env.append_value('CXXFLAGS', ['-isystem', f"{clang_res}/include"])
 
-    # With -nostdinc++ Clang cannot find the GCC C++ stdlib (libstdc++), so
-    # <system_error>, <stdexcept>, etc. are missing. Ask the cross g++ for its
-    # libstdc++ tree and add the three standard dirs as C++-only includes.
     libstdcxx = conf.cmd_and_log([gxx, '-print-file-name=include/c++']).strip()
     for d in (libstdcxx,
               os.path.join(libstdcxx, triple),
@@ -70,16 +56,11 @@ actions:
         if os.path.isdir(d):
             conf.env.append_value('CXXFLAGS', ['-isystem', d])
 
-    # ABI_FLAGS is shared by compile and link. The static block above pushed
-    # clang-only driver flags into it. The cross GCC used at link time rejects
-    # those, so pull them out of ABI_FLAGS (which feeds the link) and keep them
-    # on the compile flag vars only.
-    clang_only_prefixes = ('--target', '--gcc-toolchain', '--sysroot',
-                           '-Qunused-arguments')
+    clang_only_prefixes = ('--target', '--gcc-toolchain', '--sysroot', '-Qunused-arguments')
 
     compile_only, gcc_safe, skip = [], [], False
     for f in conf.env.ABI_FLAGS:
-        if skip:                       # path following -isystem
+        if skip:
             compile_only.append(f)
             skip = False
             continue
@@ -90,107 +71,114 @@ actions:
         if f.startswith(clang_only_prefixes):
             compile_only.append(f)
         else:
-            gcc_safe.append(f)         # -mcpu / -mthumb / -mfloat-abi / ...
+            gcc_safe.append(f)
 
-    # ABI_FLAGS now holds only gcc-valid flags (the -m* float ABI). These reach
-    # both compile and link, keeping the float ABI consistent.
     conf.env.ABI_FLAGS = gcc_safe
-
     conf.env.append_value('CFLAGS', compile_only)
     conf.env.append_value('CXXFLAGS', compile_only)
     conf.env.append_value('ASFLAGS', compile_only)
 
-    # Compile with clang, link with the cross GCC + -qrtems (pulls in the BSP
-    # start file and linker script; fixes the missing _start). ABI_FLAGS still
-    # carries the -m* float ABI to the link so the executable matches the
-    # hard-float libraries.
     conf.env.LINK_CC = [gcc]
     conf.env.LINK_CXX = [gxx]
     conf.env.append_value('LINKFLAGS', ['-qrtems'])
 
-    # ------------------------------------------------------------------
-    # Generate the aspis-cc wrapper and route the C compiler through it.
-    #
-    # The wrapper behaves exactly like clang for every file, except for
-    # aspis_sample_hardened/workload.c, which it runs through the ASPIS
-    # opt passes (emit IR -> harden -> compile back to an object). It also
-    # writes the .d dependency file waf expects, so gccdeps stays happy.
-    # ------------------------------------------------------------------
+
+    # Generate the aspis-cc wrapper (PYTHON VERSION + DEBUG IR)
+
     wrapper_src = textwrap.dedent('''\
-        #!/bin/bash
-        # aspis-cc: drop-in clang wrapper. Hardens only the hardened sample's
-        # workload.c through ASPIS; every other file goes straight to clang.
+        #!/usr/bin/env python3
+        import sys
+        import os
+        import subprocess
 
-        CLANG=/opt/rtems-llvm/rtems/bin/clang
-        OPT=/opt/rtems-llvm/rtems/bin/opt
-        PASSES=/opt/rtems-llvm/ASPIS/build/passes
+        CLANG = "/opt/rtems-llvm/rtems/bin/clang"
+        OPT = "/opt/rtems-llvm/rtems/bin/opt"
+        PASSES = "/opt/rtems-llvm/ASPIS/build/passes"
 
-        # Find the .c source being compiled.
-        src=""
-        for a in "$@"; do
-          case "$a" in
-            *.c) src="$a" ;;
-          esac
-        done
+        HARDEN_TARGETS = [
+            "timespecisvalid.c"
+        ]
 
-        # Only the hardened sample's workload goes through ASPIS.
-        case "$src" in
-          *aspis_sample_hardened/workload.c) : ;;
-          *) exec "$CLANG" "$@" ;;
-        esac
+        args = sys.argv[1:]
 
-        # Find the output object (-o file, either "-o x" or "-ox").
-        out=""; prev=""
-        for a in "$@"; do
-          if [ "$prev" = "-o" ]; then out="$a"; prev=""; continue; fi
-          case "$a" in
-            -o)   prev="-o" ;;
-            -o?*) out="${a#-o}" ;;
-            *)    ;;
-          esac
-        done
 
-        # waf/gccdeps expects the .d next to the object: same name, .o -> .d
-        depfile="${out%.o}.d"
+        src = next((a for a in args if a.endswith('.c') and not a.startswith('-')), None)
 
-        tmp=$(mktemp -d)
-        trap 'rm -rf "$tmp"' EXIT
 
-        # Rebuild the flag list without -c/-S, the output, the dependency
-        # options and the source: we add those back in the right steps.
-        flags=(); prev=""; skip=""
-        for a in "$@"; do
-          if [ -n "$skip" ]; then skip=""; prev="$a"; continue; fi
-          case "$a" in
-            -c|-S)        prev="$a"; continue ;;
-            -o)           skip=1; prev="$a"; continue ;;
-            -o?*)         prev="$a"; continue ;;
-            -MF|-MT|-MQ)  skip=1; prev="$a"; continue ;;
-            -MMD|-MD|-MP) prev="$a"; continue ;;
-            "$src")       prev="$a"; continue ;;
-            *)            flags+=("$a") ;;
-          esac
-          prev="$a"
-        done
+        needs_hardening = any(target in src for target in HARDEN_TARGETS) if src else False
+        
+        if not needs_hardening:
+            os.execv(CLANG, [CLANG] + args)
 
-        # 1. source -> IR, and write the .d file waf expects.
-        "$CLANG" "${flags[@]}" -g -MMD -MF "$depfile" -emit-llvm -S "$src" -o "$tmp/a.ll" || exit 1
 
-        # 2. ASPIS pipeline: EDDI + sEDDI + RASM + duplicate-globals.
-        # -debug-enabled=true is only valid once an ASPIS plugin (which links
-        # in Utils.cpp, where the flag is registered) has been loaded. The
-        # plain simplifycfg step below loads no plugin, so it must NOT get
-        # the flag or opt aborts with "Unknown command line argument".
-        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so"  -debug-enabled=true -passes="func-ret-to-ref"   "$tmp/a.ll" -o "$tmp/b.ll" -S || exit 1
-        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so" -debug-enabled=true -passes="eddi-verify"       "$tmp/b.ll" -o "$tmp/c.ll" -S || exit 1
-        "$OPT"                                                             -passes="simplifycfg"       "$tmp/c.ll" -o "$tmp/d.ll" -S || exit 1
-        "$OPT" -load-pass-plugin "$PASSES/libRASM.so"  -debug-enabled=true -passes="rasm-verify"       "$tmp/d.ll" -o "$tmp/e.ll" -S || exit 1
-        "$OPT" -load-pass-plugin "$PASSES/libEDDI.so"  -debug-enabled=true -passes="duplicate-globals" "$tmp/e.ll" -o "$tmp/f.ll" -S || exit 1
+        out = None
+        flags = []
+        skip_next = False
 
-        # 3. hardened IR -> object.
-        "$CLANG" "${flags[@]}" -c "$tmp/f.ll" -o "$out" || exit 1
+        for i, a in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+            
+            if a in ('-c', '-S'):
+                continue
+            if a == '-o':
+                out = args[i+1]
+                skip_next = True
+                continue
+            if a.startswith('-o') and len(a) > 2:
+                out = a[2:]
+                continue
+            if a in ('-MF', '-MT', '-MQ'):
+                skip_next = True
+                continue
+            if a in ('-MMD', '-MD', '-MP'):
+                continue
+            if a == src:
+                continue
+                
+            flags.append(a)
 
-        echo "[aspis-cc] HARDENED $src -> $out" >&2
+        if not out:
+            print("[aspis-cc] Errore: flag di output (-o) non trovato.", file=sys.stderr)
+            sys.exit(1)
+
+        depfile = out.rsplit('.o', 1)[0] + ".d" if out.endswith('.o') else out + ".d"
+
+       
+        def run_cmd(cmd):
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"[aspis-cc] Errore comando: {' '.join(cmd)}", file=sys.stderr)
+                sys.exit(e.returncode)
+
+
+        # DEBUG IR
+
+        tmp = "/tmp/aspis_debug"
+        os.makedirs(tmp, exist_ok=True)
+
+        a_ll, b_ll, c_ll = f"{tmp}/a.ll", f"{tmp}/b.ll", f"{tmp}/c.ll"
+        d_ll, e_ll, f_ll = f"{tmp}/d.ll", f"{tmp}/e.ll", f"{tmp}/f.ll"
+
+
+        run_cmd([CLANG] + flags + ['-g', '-MMD', '-MF', depfile, '-emit-llvm', '-S', src, '-o', a_ll])
+
+
+        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libEDDI.so", "-debug-enabled=true", "-passes=func-ret-to-ref", a_ll, "-o", b_ll, "-S"])
+        
+
+        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libSEDDI.so", "-debug-enabled=true", "-passes=eddi-verify", b_ll, "-o", c_ll, "-S"])
+        
+        run_cmd([OPT, "-passes=simplifycfg", c_ll, "-o", d_ll, "-S"])
+        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libRASM.so", "-debug-enabled=true", "-passes=rasm-verify", d_ll, "-o", e_ll, "-S"])
+        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libEDDI.so", "-debug-enabled=true", "-passes=duplicate-globals", e_ll, "-o", f_ll, "-S"])
+
+
+        run_cmd([CLANG] + flags + ['-c', f_ll, '-o', out])
+
+        print(f"[aspis-cc] HARDENED {src} -> {out} (IR salvata in {tmp})", file=sys.stderr)
         ''')
 
     wrapper_path = os.path.join(conf.bldnode.abspath(), 'aspis-cc')
@@ -198,9 +186,8 @@ actions:
         fp.write(wrapper_src)
     os.chmod(wrapper_path, os.stat(wrapper_path).st_mode | stat.S_IEXEC)
 
-    # Route the C compiler through the wrapper. Leave CXX as clang++ so C++
-    # files are unaffected.
     conf.env.CC = [wrapper_path]
+
 build-type: option
 copyrights:
 - Copyright (C) 2020 Hesham Almatary <Hesham.Almatary@cl.cam.ac.uk>

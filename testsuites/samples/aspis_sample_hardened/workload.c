@@ -1,8 +1,3 @@
-/* workload.c — calcolo puro, nessuna dipendenza RTEMS.
- * Questo e' l'UNICO file che passa per ASPIS.
- * Matrice deterministica A[i][j] = i*N + j + 1; calcola B = A*A e
- * restituisce la somma di tutti gli elementi di B come checksum a 32 bit
- * (overflow wrap voluto -> valore riproducibile bit a bit, verificabile). */
 #include <stdint.h>
 #include <stdio.h>
 

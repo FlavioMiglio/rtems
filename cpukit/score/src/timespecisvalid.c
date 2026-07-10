@@ -41,6 +41,11 @@
 
 #include <rtems/score/timespec.h>
 #include <rtems/score/todimpl.h>
+#include <rtems/bspIo.h> 
+
+void DataCorruption_Handler();
+void SigMismatch_Handler();
+
 
 bool _Timespec_Is_valid( const struct timespec *time )
 {
@@ -61,4 +66,15 @@ bool _Timespec_Is_valid( const struct timespec *time )
   }
 
   return true;
+}
+
+
+void DataCorruption_Handler(void) {
+  printk("\n[!] KERNEL PANIC - ASPIS: DATA CORRUPTION IN TIMESPEC\n");
+  while(1);
+}
+
+void SigMismatch_Handler(void) {
+  printk("\n[!] KERNEL PANIC - ASPIS: SIG MISMATCH IN TIMESPEC\n");
+  while(1);
 }
