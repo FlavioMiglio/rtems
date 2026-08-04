@@ -96,7 +96,8 @@ actions:
         PASSES = "/opt/rtems-llvm/ASPIS/build/passes"
 
         HARDEN_TARGETS = [
-            "timespecisvalid.c"
+            "timespecisvalid.c",
+            "aspis_sample_hardened/workload.c"
         ]
 
         args = sys.argv[1:]
@@ -169,7 +170,7 @@ actions:
         run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libEDDI.so", "-debug-enabled=true", "-passes=func-ret-to-ref", a_ll, "-o", b_ll, "-S"])
         
 
-        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libSEDDI.so", "-debug-enabled=true", "-passes=eddi-verify", b_ll, "-o", c_ll, "-S"])
+        run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libEDDI.so", "-debug-enabled=true", "-passes=eddi-verify", b_ll, "-o", c_ll, "-S"])
         
         run_cmd([OPT, "-passes=simplifycfg", c_ll, "-o", d_ll, "-S"])
         run_cmd([OPT, "-load-pass-plugin", f"{PASSES}/libRASM.so", "-debug-enabled=true", "-passes=rasm-verify", d_ll, "-o", e_ll, "-S"])
