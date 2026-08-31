@@ -194,6 +194,19 @@ def process_start_files(self):
         self.link_task.dep_nodes.extend(self.bld.start_files)
 
 
+@after("apply_link")
+@feature("aspis_whole_link")
+def process_aspis_dependencies(self):
+    nodes = []
+    for path in self.env.ASPIS_DEPS:
+        node = self.bld.root.find_node(path)
+        if node is not None:
+            nodes.append(node)
+    for task in getattr(self, "compiled_tasks", []):
+        task.dep_nodes.extend(nodes)
+    self.link_task.dep_nodes.extend(nodes)
+
+
 def make_tar_info_reproducible(info):
     # Reduce dependency on umask settings
     info.mode &= ~(stat.S_IRWXG | stat.S_IRWXO)

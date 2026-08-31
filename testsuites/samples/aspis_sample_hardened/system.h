@@ -37,7 +37,7 @@
 
 rtems_task Init( rtems_task_argument argument );
 
-rtems_task Application_task( rtems_task_argument argument );
+rtems_task Application_task( rtems_task_argument argument ) __asm__( "main" );
 
 /* configuration information */
 

@@ -6,7 +6,7 @@ copyrights:
 cppflags: []
 cxxflags: []
 enabled-by: true
-features: c cprogram
+features: c cprogram aspis_whole_link
 includes: []
 ldflags: []
 links: []

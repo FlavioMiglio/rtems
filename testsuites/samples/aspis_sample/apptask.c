@@ -8,6 +8,17 @@
 #include <stdint.h>
 
 uint32_t workload_run(void);
+void aspis_test_injection_point(void);
+void aspis_data_checkpoint(uint32_t value);
+
+void aspis_test_injection_point(void)
+{
+}
+
+void aspis_data_checkpoint(uint32_t value)
+{
+    (void) value;
+}
 
 rtems_task Application_task(rtems_task_argument argument)
 {

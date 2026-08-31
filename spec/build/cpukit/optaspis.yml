@@ -1,0 +1,112 @@
+SPDX-License-Identifier: CC-BY-SA-4.0 OR BSD-2-Clause
+actions:
+- script: |
+    import os
+    import stat
+    import sys
+    import textwrap
+
+    variant = conf.env['VARIANT']
+    variant = variant[0] if isinstance(variant, list) else variant
+    wrapper_suffix = variant.replace('/', '-')
+
+    clang = os.path.abspath(conf.env.CC[0])
+    llvm_bin = os.path.dirname(clang)
+    opt = os.path.join(llvm_bin, "opt")
+    llvm_link = os.path.join(llvm_bin, "llvm-link")
+    gcc = conf.env.LINK_CC[0]
+    passes = "/opt/rtems-llvm/ASPIS/build/passes"
+
+    integration_dir = os.path.join(conf.path.abspath(), "tools", "aspis")
+    compile_script = os.path.join(integration_dir, "compile_wrapper.py")
+    link_script = os.path.join(integration_dir, "link_wrapper.py")
+
+    for script in (compile_script, link_script):
+        if not os.path.isfile(script):
+            conf.fatal("ASPIS wrapper script not found: {}".format(script))
+
+    wrapper_dir = getattr(conf, "cachedir", conf.bldnode).abspath()
+
+    def write_launcher(path, command, os=os, stat=stat, sys=sys, textwrap=textwrap):
+        source = textwrap.dedent('''\
+            #!/usr/bin/env python3
+            import os
+            import sys
+
+            PYTHON = @@PYTHON@@
+            COMMAND = @@COMMAND@@
+
+            os.execv(PYTHON, COMMAND + sys.argv[1:])
+            ''')
+        source = source.replace("@@PYTHON@@", repr(sys.executable))
+        source = source.replace("@@COMMAND@@", repr(command))
+        with open(path, "w") as output:
+            output.write(source)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+
+    compile_launcher = os.path.join(
+        wrapper_dir,
+        "aspis-cc-{}".format(wrapper_suffix),
+    )
+    write_launcher(
+        compile_launcher,
+        [
+            sys.executable,
+            compile_script,
+            "--clang",
+            clang,
+            "--opt",
+            opt,
+            "--passes",
+            passes,
+            "--",
+        ],
+    )
+
+    link_launcher = os.path.join(
+        wrapper_dir,
+        "aspis-link-{}".format(wrapper_suffix),
+    )
+    write_launcher(
+        link_launcher,
+        [
+            sys.executable,
+            link_script,
+            "--clang",
+            clang,
+            "--opt",
+            opt,
+            "--llvm-link",
+            llvm_link,
+            "--gcc",
+            gcc,
+            "--passes",
+            passes,
+            "--",
+        ],
+    )
+
+    conf.env.CC = [compile_launcher]
+    conf.env.LINK_CC = [link_launcher]
+    conf.env.ASPIS_DEPS = [
+        compile_launcher,
+        link_launcher,
+        compile_script,
+        link_script,
+        clang,
+        opt,
+        llvm_link,
+        os.path.join(passes, "libEDDI.so"),
+        os.path.join(passes, "libSEDDI.so"),
+        os.path.join(passes, "libRASM.so"),
+    ]
+build-type: option
+copyrights:
+- Copyright (C) 2026 The RTEMS Project contributors
+default: []
+description: ASPIS integration for RTEMS Clang builds
+enabled-by:
+- clang
+links: []
+name: ASPIS
+type: build

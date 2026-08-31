@@ -7,7 +7,21 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#define ASPIS_CHECKPOINT \
+  __attribute__((annotate("exclude"), noinline, optnone))
+
 uint32_t workload_run(void);
+void aspis_test_injection_point(void) ASPIS_CHECKPOINT;
+void aspis_data_checkpoint(uint32_t value) ASPIS_CHECKPOINT;
+
+void aspis_test_injection_point(void)
+{
+}
+
+void aspis_data_checkpoint(uint32_t value)
+{
+    (void) value;
+}
 
 rtems_task Application_task(rtems_task_argument argument)
 {
