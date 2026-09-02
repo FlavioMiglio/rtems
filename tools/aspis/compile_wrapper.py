@@ -38,7 +38,7 @@ src = next(
 )
 
 def fail(message):
-    print(f"[aspis-cc] Errore: {message}", file=sys.stderr)
+    print(f"[aspis-cc] Error: {message}", file=sys.stderr)
     sys.exit(1)
 
 def run_cmd(cmd, cwd=None):
@@ -46,7 +46,7 @@ def run_cmd(cmd, cwd=None):
         subprocess.run(cmd, check=True, cwd=cwd)
     except (OSError, subprocess.CalledProcessError) as error:
         print(
-            f"[aspis-cc] Errore comando: {' '.join(cmd)}: {error}",
+            f"[aspis-cc] Command failed: {' '.join(cmd)}: {error}",
             file=sys.stderr,
         )
         sys.exit(getattr(error, "returncode", 1))
@@ -64,7 +64,7 @@ def parse_compile_args(argv, source):
             continue
         if arg == "-o":
             if index + 1 >= len(argv):
-                fail("argomento mancante dopo -o")
+                fail("missing argument after -o")
             out = argv[index + 1]
             skip_next = True
             continue
@@ -91,22 +91,37 @@ normalized_src = (
 if src and LINKED_SAMPLE in normalized_src:
     out, backend_flags = parse_compile_args(args, src)
     if not out:
-        fail("flag di output (-o) non trovato")
+        fail("output flag (-o) not found")
 
-    run_cmd([CLANG, "-emit-llvm"] + args)
+    # Keep Waf's declared output as a native object and exchange a separate,
+    # explicitly textual LLVM IR sidecar with the ASPIS link wrapper.
+    run_cmd([CLANG] + args)
+    absolute_output = os.path.abspath(out)
+    llvm_ir = absolute_output + ".aspis.ll"
+    temporary_ir = f"{llvm_ir}.tmp.{os.getpid()}"
+    run_cmd(
+        [CLANG]
+        + backend_flags
+        + ["-emit-llvm", "-S", src, "-o", temporary_ir]
+    )
+    os.replace(temporary_ir, llvm_ir)
 
     manifest = {
+        "format": 1,
         "source": os.path.abspath(src),
+        "object": absolute_output,
+        "llvm_ir": llvm_ir,
+        "llvm_ir_format": "text",
         "backend_flags": backend_flags,
     }
-    manifest_path = os.path.abspath(out) + ".aspis.json"
+    manifest_path = absolute_output + ".aspis.json"
     temporary_manifest = f"{manifest_path}.tmp.{os.getpid()}"
     with open(temporary_manifest, "w", encoding="utf-8") as output:
         json.dump(manifest, output, indent=2)
         output.write(chr(10))
     os.replace(temporary_manifest, manifest_path)
 
-    print(f"[aspis-cc] BITCODE {src} -> {out}", file=sys.stderr)
+    print(f"[aspis-cc] TEXTUAL LLVM IR {src} -> {llvm_ir}", file=sys.stderr)
     sys.exit(0)
 
 needs_rasm = src and any(target in normalized_src for target in RASM_TARGETS)
@@ -115,7 +130,7 @@ if not needs_rasm:
 
 out, flags = parse_compile_args(args, src)
 if not out:
-    fail("flag di output (-o) non trovato")
+    fail("output flag (-o) not found")
 
 depfile = os.path.splitext(out)[0] + ".d"
 debug_dir = os.path.abspath(out) + ".aspis"
@@ -156,6 +171,6 @@ run_cmd(
 run_cmd([CLANG] + flags + ["-c", rasm_ir, "-o", out])
 
 print(
-    f"[aspis-cc] RASM {src} -> {out} (IR salvato in {debug_dir})",
+    f"[aspis-cc] RASM {src} -> {out} (IR saved in {debug_dir})",
     file=sys.stderr,
 )

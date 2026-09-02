@@ -39,7 +39,7 @@ GROUP_MARKER = "/testsuites/samples/aspis_sample_hardened/"
 EXPECTED_SOURCES = ("workload.c", "apptask.c", "init.c")
 
 def fail(message):
-    print(f"[aspis-link] Errore: {message}", file=sys.stderr)
+    print(f"[aspis-link] Error: {message}", file=sys.stderr)
     sys.exit(1)
 
 def run_cmd(cmd, cwd=None):
@@ -47,7 +47,7 @@ def run_cmd(cmd, cwd=None):
         subprocess.run(cmd, check=True, cwd=cwd)
     except (OSError, subprocess.CalledProcessError) as error:
         print(
-            f"[aspis-link] Errore comando: {' '.join(cmd)}: {error}",
+            f"[aspis-link] Command failed: {' '.join(cmd)}: {error}",
             file=sys.stderr,
         )
         sys.exit(getattr(error, "returncode", 1))
@@ -56,7 +56,7 @@ def find_output(argv):
     for index, arg in enumerate(argv):
         if arg == "-o":
             if index + 1 >= len(argv):
-                fail("argomento mancante dopo -o")
+                fail("missing argument after -o")
             return argv[index + 1]
         if arg.startswith("-o") and len(arg) > 2:
             return arg[2:]
@@ -81,43 +81,60 @@ for object_path in group_objects:
     for source_name in EXPECTED_SOURCES:
         if object_name.startswith(source_name + "."):
             if source_name in matched:
-                fail(f"input duplicato per {source_name}")
+                fail(f"duplicate input for {source_name}")
             matched[source_name] = object_path
             break
 
 missing = [name for name in EXPECTED_SOURCES if name not in matched]
 if missing or len(group_objects) != len(EXPECTED_SOURCES):
     fail(
-        "set di bitcode incompleto: "
-        f"attesi {EXPECTED_SOURCES}, trovati {group_objects}, mancanti {missing}"
+        "incomplete textual LLVM IR input set: "
+        f"expected {EXPECTED_SOURCES}, found {group_objects}, missing {missing}"
     )
 
 manifests = []
 absolute_objects = []
+llvm_ir_inputs = []
 for source_name in EXPECTED_SOURCES:
     object_path = os.path.abspath(matched[source_name])
     absolute_objects.append(object_path)
 
-    try:
-        with open(object_path, "rb") as bitcode:
-            magic = bitcode.read(4)
-    except OSError as error:
-        fail(f"impossibile leggere {object_path}: {error}")
-    if magic not in (b"BC\xc0\xde", b"\xde\xc0\x17\x0b"):
-        fail(f"{object_path} non contiene LLVM bitcode")
-
     manifest_path = object_path + ".aspis.json"
     try:
         with open(manifest_path, "r", encoding="utf-8") as manifest_file:
-            manifests.append(json.load(manifest_file))
+            manifest = json.load(manifest_file)
     except (OSError, ValueError) as error:
-        fail(f"manifest non valido {manifest_path}: {error}")
+        fail(f"invalid manifest {manifest_path}: {error}")
+
+    if manifest.get("format") != 1:
+        fail(f"outdated ASPIS manifest {manifest_path}; rebuild the object")
+    if manifest.get("llvm_ir_format") != "text":
+        fail(f"non-textual LLVM IR format in {manifest_path}")
+    llvm_ir = manifest.get("llvm_ir")
+    if not isinstance(llvm_ir, str):
+        fail(f"textual LLVM IR path missing from {manifest_path}")
+    llvm_ir = os.path.abspath(llvm_ir)
+    if not llvm_ir.endswith(".ll"):
+        fail(f"textual LLVM IR sidecar must use the .ll extension: {llvm_ir}")
+    try:
+        with open(llvm_ir, "r", encoding="utf-8") as llvm_ir_file:
+            llvm_ir_header = llvm_ir_file.read(4096)
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot read textual LLVM IR {llvm_ir}: {error}")
+    if not re.search(
+        r"(?m)^(?:source_filename|target datalayout|target triple|define|declare|@)",
+        llvm_ir_header,
+    ):
+        fail(f"unrecognized textual LLVM IR in {llvm_ir}")
+
+    manifests.append(manifest)
+    llvm_ir_inputs.append(llvm_ir)
 
 backend_flags = manifests[0].get("backend_flags")
 if not isinstance(backend_flags, list):
-    fail("backend_flags assenti dal manifest")
+    fail("backend_flags missing from manifest")
 if any(manifest.get("backend_flags") != backend_flags for manifest in manifests[1:]):
-    fail("i translation unit usano flag di code generation incompatibili")
+    fail("translation units use incompatible code-generation flags")
 
 debug_dir = os.path.abspath(output) + ".aspis"
 os.makedirs(debug_dir, exist_ok=True)
@@ -136,6 +153,7 @@ with open(os.path.join(debug_dir, "inputs.json"), "w", encoding="utf-8") as info
     json.dump(
         {
             "objects": absolute_objects,
+            "llvm_ir": llvm_ir_inputs,
             "sources": [manifest.get("source") for manifest in manifests],
             "backend_flags": backend_flags,
         },
@@ -145,7 +163,7 @@ with open(os.path.join(debug_dir, "inputs.json"), "w", encoding="utf-8") as info
     info.write(chr(10))
 
 run_cmd(
-    [LLVM_LINK, "-S"] + absolute_objects + ["-o", linked_ir],
+    [LLVM_LINK, "-S"] + llvm_ir_inputs + ["-o", linked_ir],
     cwd=debug_dir,
 )
 
@@ -153,7 +171,7 @@ try:
     with open(linked_ir, "r", encoding="utf-8") as linked_file:
         linked_text = linked_file.read()
 except OSError as error:
-    fail(f"impossibile verificare {linked_ir}: {error}")
+    fail(f"cannot verify {linked_ir}: {error}")
 
 required_definitions = (
     "main",
@@ -170,9 +188,9 @@ missing_definitions = [
     if not re.search(r"\bdefine\b[^\n]*@" + re.escape(name) + r"\(", linked_text)
 ]
 if missing_definitions:
-    fail(f"definizioni mancanti nel modulo collegato: {missing_definitions}")
+    fail(f"definitions missing from linked module: {missing_definitions}")
 if re.search(r"@Application_task\(", linked_text):
-    fail("Application_task non e' stato esposto come entry point IR main")
+    fail("Application_task was not exposed as the main IR entry point")
 
 run_cmd(
     [OPT, "-passes=lower-switch", linked_ir, "-o", lowered_ir, "-S"],
@@ -254,15 +272,15 @@ try:
     with open(final_ir, "r", encoding="utf-8") as final_file:
         final_text = final_file.read()
 except OSError as error:
-    fail(f"impossibile verificare {final_ir}: {error}")
+    fail(f"cannot verify {final_ir}: {error}")
 
 if not re.search(r"\bdefine\b[^\n]*@main\(", final_text):
-    fail("sEDDI non ha mantenuto l'entry point main")
+    fail("sEDDI did not preserve the main entry point")
 if not re.search(r"@workload_run(?:_ret)?_dup\(", final_text):
-    fail("sEDDI non ha generato il percorso duplicato del workload")
+    fail("sEDDI did not generate the duplicated workload path")
 for checkpoint in ("aspis_test_injection_point", "aspis_data_checkpoint"):
     if not re.search(r"\bcall\b[^\n]*@" + checkpoint + r"\(", final_text):
-        fail(f"checkpoint eliminato dalla pipeline: {checkpoint}")
+        fail(f"checkpoint removed by the pipeline: {checkpoint}")
 
 run_cmd(
     [CLANG] + backend_flags + ["-Qunused-arguments", "-c", final_ir, "-o", combined_object]
@@ -279,10 +297,10 @@ for arg in args:
         continue
     replacement_args.append(arg)
 if not inserted:
-    fail("impossibile sostituire i bitcode nel comando di link")
+    fail("cannot replace the selected objects in the link command")
 
 print(
-    f"[aspis-link] LINKED sEDDI/RASM -> {combined_object}; link finale {output}",
+    f"[aspis-link] LINKED sEDDI/RASM -> {combined_object}; final link {output}",
     file=sys.stderr,
 )
 os.execvp(GCC, [GCC] + replacement_args)
